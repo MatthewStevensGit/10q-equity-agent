@@ -20,9 +20,8 @@ _FMT_SYSTEM = (
     "You are an equity research analyst. Be concrete and numbers-grounded. "
     "Never invent a figure that isn't in the provided context -- if something "
     "needed isn't available, say so explicitly rather than guessing. "
-    "This is an educational research demo, not investment advice; do not use "
-    "the words 'buy' or 'sell' as a directive -- use a qualitative stance "
-    "(Bullish / Neutral / Bearish) with reasoning instead."
+    "Do not use the words 'buy' or 'sell' as a directive -- use a "
+    "qualitative stance (Bullish / Neutral / Bearish) with reasoning instead."
 )
 
 
@@ -61,14 +60,18 @@ def _fmt_ratios(ratios: dict) -> str:
 
 def run_analysis(
     company: str, ticker: str, report_date: str, ratios: dict, filing_text: str,
-    on_step=None,
+    on_step=None, on_step_done=None,
 ) -> AnalysisRun:
-    """on_step(step_number, title), called just before each step runs, so a
-    caller (the Streamlit UI) can show live progress through a multi-step
-    pipeline that can take the better part of a minute end to end -- purely
-    optional, defaults to a no-op so this stays usable from a plain script."""
+    """on_step(step_number, title), called just before each step runs, and
+    on_step_done(step_number, title, output), called right after -- together
+    they let a caller (the Streamlit UI) show live progress AND a recap of
+    what each step actually found through a pipeline that can take the
+    better part of a minute end to end. Both purely optional, default to a
+    no-op so this stays usable from a plain script."""
     if on_step is None:
         on_step = lambda *_: None
+    if on_step_done is None:
+        on_step_done = lambda *_: None
     run = AnalysisRun(company=company, ticker=ticker, report_date=report_date)
     ratio_block = _fmt_ratios(ratios)
     # edgar_client.fetch_filing_text already returns plain text anchored on
@@ -90,6 +93,7 @@ def run_analysis(
         max_output_tokens=800,
     )
     run.steps.append(StepResult("1. Quantitative Snapshot", s1))
+    on_step_done(1, "Quantitative Snapshot", s1)
 
     # Step 2 -- MD&A / risk-factor synthesis from the real filing text.
     on_step(2, "Risk & MD&A Synthesis")
@@ -104,6 +108,7 @@ def run_analysis(
         max_output_tokens=800,
     )
     run.steps.append(StepResult("2. Risk & MD&A Synthesis", s2))
+    on_step_done(2, "Risk & MD&A Synthesis", s2)
 
     # Step 3 -- consistency check: does the qualitative story match the numbers?
     on_step(3, "Narrative-vs-Numbers Consistency Check")
@@ -119,6 +124,7 @@ def run_analysis(
         max_output_tokens=600,
     )
     run.steps.append(StepResult("3. Narrative-vs-Numbers Consistency Check", s3))
+    on_step_done(3, "Narrative-vs-Numbers Consistency Check", s3)
 
     # Step 4 -- capital allocation / sustainability read.
     on_step(4, "Capital Allocation & Sustainability")
@@ -134,6 +140,7 @@ def run_analysis(
         max_output_tokens=500,
     )
     run.steps.append(StepResult("4. Capital Allocation & Sustainability", s4))
+    on_step_done(4, "Capital Allocation & Sustainability", s4)
 
     # Step 5 -- final recommendation, synthesizing steps 1-4, not raw data.
     on_step(5, "Final Equity Stance")
@@ -147,10 +154,10 @@ def run_analysis(
             f"4) Capital allocation read:\n{s4}\n\n"
             "Synthesize a final equity research stance: Bullish / Neutral / Bearish, with a one-paragraph "
             "thesis, the single biggest supporting factor, and the single biggest risk to that thesis. "
-            "Ground every claim in the four steps above -- do not introduce new figures. "
-            "Remind the reader this is an educational demo, not investment advice."
+            "Ground every claim in the four steps above -- do not introduce new figures."
         ),
         max_output_tokens=500,
     )
     run.recommendation = s5
+    on_step_done(5, "Final Equity Stance", s5)
     return run

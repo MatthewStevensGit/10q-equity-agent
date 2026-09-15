@@ -46,6 +46,30 @@ def _get(url: str) -> dict:
 
 
 _ticker_cik_cache: dict[str, int] | None = None
+_directory_cache: list[tuple[str, str, int]] | None = None
+
+
+def _load_directory() -> list[tuple[str, str, int]]:
+    """The full (ticker, company_name, cik) list from SEC's ~800KB ticker
+    map, loaded once and cached for the process lifetime. Same underlying
+    fetch ticker_to_cik used to do alone -- split out so callers that need
+    company names (search/autocomplete) and the ticker->CIK lookup share
+    one cache instead of two drifting apart."""
+    global _directory_cache
+    if _directory_cache is None:
+        raw = _get(_TICKER_MAP_URL)
+        _directory_cache = [
+            (row["ticker"].upper(), row["title"], row["cik_str"])
+            for row in raw.values()
+        ]
+    return _directory_cache
+
+
+def company_directory() -> list[tuple[str, str, int]]:
+    """Public accessor for the full (ticker, company_name, cik) list --
+    used by the UI's ticker/company-name search. Returned list is the same
+    object as the internal cache; treat as read-only."""
+    return _load_directory()
 
 
 def ticker_to_cik(ticker: str) -> int | None:
@@ -62,10 +86,7 @@ def ticker_to_cik(ticker: str) -> int | None:
     failed before this normalization existed."""
     global _ticker_cik_cache
     if _ticker_cik_cache is None:
-        raw = _get(_TICKER_MAP_URL)
-        _ticker_cik_cache = {
-            row["ticker"].upper(): row["cik_str"] for row in raw.values()
-        }
+        _ticker_cik_cache = {t: cik for t, _name, cik in _load_directory()}
     cleaned = ticker.strip().upper().lstrip("$")
     if cleaned in _ticker_cik_cache:
         return _ticker_cik_cache[cleaned]
