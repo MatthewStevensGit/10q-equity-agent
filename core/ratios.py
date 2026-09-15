@@ -158,6 +158,39 @@ def extract_facts(company_facts_json: dict) -> ExtractedFacts:
     return result
 
 
+def extract_history(company_facts_json: dict, metric: str, n_quarters: int = 8) -> list[tuple[str, float]]:
+    """Up to n_quarters of real, isolated single-quarter values for one
+    metric, oldest first -- for an actual trend chart, not just a two-point
+    latest-vs-year-ago comparison. Reuses the same tag-merge and YTD-
+    subtraction logic as the point-in-time extraction, applied across every
+    distinct period this filer has reported, not just the two closest to
+    today."""
+    us_gaap = company_facts_json.get("facts", {}).get("us-gaap", {})
+    tags = _TAGS.get(metric)
+    if not tags:
+        return []
+    raw = _all_points(us_gaap, tags)
+    if not raw:
+        return []
+
+    if all(f.get("start") is None for f in raw):  # instant/balance-sheet metric
+        by_end: dict[str, dict] = {}
+        for f in raw:
+            by_end[f["end"]] = f  # last one wins if duplicated across filings
+        ends = sorted(by_end)[-n_quarters:]
+        return [(e, by_end[e]["val"]) for e in ends]
+
+    ends = sorted({f["end"] for f in raw}, reverse=True)
+    points: list[tuple[str, float]] = []
+    for e in ends:
+        if len(points) >= n_quarters:
+            break
+        iso = _isolate_quarter(raw, e)
+        if iso:
+            points.append((e, iso["val"]))
+    return list(reversed(points))  # oldest first, for a left-to-right chart
+
+
 def _div(a: float | None, b: float | None) -> float | None:
     if a is None or b is None or b == 0:
         return None

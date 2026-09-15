@@ -73,8 +73,16 @@ def generate(system: str, user: str, max_output_tokens: int = 2048) -> str:
         except ClientError as exc:
             # RESOURCE_EXHAUSTED = this model's free-tier quota is used up;
             # NOT_FOUND = this model name has been deprecated/retired.
-            # Both just mean "try the next model," not a real request error.
-            if getattr(exc, "status", None) in ("RESOURCE_EXHAUSTED", "NOT_FOUND"):
+            # INVALID_ARGUMENT is normally a real bad-request bug worth
+            # surfacing immediately -- but found live: a real 400
+            # INVALID_ARGUMENT on one specific (likely preview/experimental)
+            # model in the chain did NOT reproduce seconds later against the
+            # exact same prompt, so it's model-specific flakiness at least
+            # some of the time, not a deterministic malformed request. Worth
+            # one pass through the rest of the chain before giving up --
+            # if every model rejects the same prompt, that's real signal;
+            # if only one does, this recovers automatically.
+            if getattr(exc, "status", None) in ("RESOURCE_EXHAUSTED", "NOT_FOUND", "INVALID_ARGUMENT"):
                 last_exc = exc
                 continue
             raise

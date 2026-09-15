@@ -59,7 +59,16 @@ def _fmt_ratios(ratios: dict) -> str:
     return "\n".join(lines)
 
 
-def run_analysis(company: str, ticker: str, report_date: str, ratios: dict, filing_text: str) -> AnalysisRun:
+def run_analysis(
+    company: str, ticker: str, report_date: str, ratios: dict, filing_text: str,
+    on_step=None,
+) -> AnalysisRun:
+    """on_step(step_number, title), called just before each step runs, so a
+    caller (the Streamlit UI) can show live progress through a multi-step
+    pipeline that can take the better part of a minute end to end -- purely
+    optional, defaults to a no-op so this stays usable from a plain script."""
+    if on_step is None:
+        on_step = lambda *_: None
     run = AnalysisRun(company=company, ticker=ticker, report_date=report_date)
     ratio_block = _fmt_ratios(ratios)
     # edgar_client.fetch_filing_text already returns plain text anchored on
@@ -68,6 +77,7 @@ def run_analysis(company: str, ticker: str, report_date: str, ratios: dict, fili
     filing_excerpt = filing_text[:30_000]
 
     # Step 1 -- quantitative snapshot from the real, structured ratios.
+    on_step(1, "Quantitative Snapshot")
     s1 = generate(
         system=_FMT_SYSTEM,
         user=(
@@ -82,6 +92,7 @@ def run_analysis(company: str, ticker: str, report_date: str, ratios: dict, fili
     run.steps.append(StepResult("1. Quantitative Snapshot", s1))
 
     # Step 2 -- MD&A / risk-factor synthesis from the real filing text.
+    on_step(2, "Risk & MD&A Synthesis")
     s2 = generate(
         system=_FMT_SYSTEM,
         user=(
@@ -95,6 +106,7 @@ def run_analysis(company: str, ticker: str, report_date: str, ratios: dict, fili
     run.steps.append(StepResult("2. Risk & MD&A Synthesis", s2))
 
     # Step 3 -- consistency check: does the qualitative story match the numbers?
+    on_step(3, "Narrative-vs-Numbers Consistency Check")
     s3 = generate(
         system=_FMT_SYSTEM,
         user=(
@@ -109,6 +121,7 @@ def run_analysis(company: str, ticker: str, report_date: str, ratios: dict, fili
     run.steps.append(StepResult("3. Narrative-vs-Numbers Consistency Check", s3))
 
     # Step 4 -- capital allocation / sustainability read.
+    on_step(4, "Capital Allocation & Sustainability")
     s4 = generate(
         system=_FMT_SYSTEM,
         user=(
@@ -123,6 +136,7 @@ def run_analysis(company: str, ticker: str, report_date: str, ratios: dict, fili
     run.steps.append(StepResult("4. Capital Allocation & Sustainability", s4))
 
     # Step 5 -- final recommendation, synthesizing steps 1-4, not raw data.
+    on_step(5, "Final Equity Stance")
     s5 = generate(
         system=_FMT_SYSTEM,
         user=(

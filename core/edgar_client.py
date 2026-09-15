@@ -51,14 +51,29 @@ _ticker_cik_cache: dict[str, int] | None = None
 def ticker_to_cik(ticker: str) -> int | None:
     """Resolve a ticker (e.g. 'AAPL') to its SEC CIK number. Caches the
     ~800KB ticker map in-process for the life of the app -- it changes
-    rarely, no need to refetch per lookup."""
+    rarely, no need to refetch per lookup.
+
+    Normalizes real paste-shaped input, not just a clean uppercase string:
+    stripped whitespace, a leading '$' (cashtag style, e.g. copied from
+    Twitter/StockTwits), and share-class tickers written with a dot
+    (Yahoo/Google Finance style, 'BRK.B') vs SEC's own dash convention
+    ('BRK-B') -- found live: SEC's ticker file only has the dash form, so
+    the dot form (the more common way people actually write it) silently
+    failed before this normalization existed."""
     global _ticker_cik_cache
     if _ticker_cik_cache is None:
         raw = _get(_TICKER_MAP_URL)
         _ticker_cik_cache = {
             row["ticker"].upper(): row["cik_str"] for row in raw.values()
         }
-    return _ticker_cik_cache.get(ticker.upper())
+    cleaned = ticker.strip().upper().lstrip("$")
+    if cleaned in _ticker_cik_cache:
+        return _ticker_cik_cache[cleaned]
+    if "." in cleaned:
+        return _ticker_cik_cache.get(cleaned.replace(".", "-"))
+    if "-" in cleaned:
+        return _ticker_cik_cache.get(cleaned.replace("-", "."))
+    return None
 
 
 @dataclass(frozen=True)
