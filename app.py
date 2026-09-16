@@ -93,10 +93,6 @@ h1, h2, h3 { letter-spacing: -0.01em; }
 
 # ── Header ───────────────────────────────────────────────────────────────
 st.title("\U0001F4C8 10-Q Equity Research Agent")
-st.caption(
-    "Real SEC filings in, a 5-step grounded LLM research pipeline out. "
-    "Free-tier end to end — SEC EDGAR (no key) + Gemini free tier."
-)
 
 with st.expander("How this actually works", expanded=False):
     st.markdown(
@@ -211,30 +207,8 @@ def _ticker_from_label(label: str | None) -> str:
 
 
 TICKER_OPTIONS = _load_ticker_options()
-_LABEL_BY_TICKER = {opt.split(" — ", 1)[0]: opt for opt in TICKER_OPTIONS}
-EXAMPLE_TICKERS = ["AAPL", "MSFT", "JPM", "NVDA", "KO"]
 
-# Example-ticker buttons run BEFORE the selectbox is instantiated below --
-# Streamlit only allows setting a widget's session_state value before that
-# widget renders in a given script run, not after.
-clicked_ticker: str | None = None
 compare_mode = st.checkbox("Compare with a second ticker")
-
-btn_cols = st.columns(len(EXAMPLE_TICKERS) + 1)
-btn_cols[0].caption("Try:")
-for c, t in zip(btn_cols[1:], EXAMPLE_TICKERS):
-    if c.button(t, use_container_width=True, key=f"ex_{t}"):
-        clicked_ticker = t
-
-if clicked_ticker and clicked_ticker in _LABEL_BY_TICKER:
-    # Found live: setting session_state["ticker_select"] and letting the
-    # selectbox render later in this SAME run left the box empty -- the
-    # click registered (button went active/red) but the value never took.
-    # A hard rerun, so the selectbox reads the pre-set value from a fresh
-    # run instead of fighting same-run widget-instantiation ordering, is
-    # the documented-safe version of this pattern.
-    st.session_state["ticker_select"] = _LABEL_BY_TICKER[clicked_ticker]
-    st.rerun()
 
 col1, col2 = st.columns(2) if compare_mode else (st.container(), None)
 with col1:
