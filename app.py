@@ -274,9 +274,16 @@ def escape_markdown_math(text: str) -> str:
 
 
 def stance_badge(text: str) -> str:
-    upper = text.upper()
-    cls = next((v for k, v in STANCE_CLASS.items() if k in upper), "stance-neutral")
-    label = next((k for k in STANCE_CLASS if k in upper), "NEUTRAL")
+    # Found live: scanning the FULL multi-paragraph recommendation let a
+    # later hedging phrase ("...rather than a fully bullish read") override
+    # the actually-stated stance -- one real case showed a BULLISH badge on
+    # a recommendation whose own heading said "Final Equity Research
+    # Stance: Neutral". The model always states its stance up front (see
+    # the step-5 prompt in services/pipeline.py), so only search that
+    # opening window, not the whole text.
+    opening = text[:150].upper()
+    cls = next((v for k, v in STANCE_CLASS.items() if k in opening), "stance-neutral")
+    label = next((k for k in STANCE_CLASS if k in opening), "NEUTRAL")
     return f'<span class="stance-badge {cls}">{label}</span>'
 
 
