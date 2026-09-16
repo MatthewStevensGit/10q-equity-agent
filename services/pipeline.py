@@ -161,3 +161,34 @@ def run_analysis(
     run.recommendation = s5
     on_step_done(5, "Final Equity Stance", s5)
     return run
+
+
+def compare_stances(
+    company1: str, ticker1: str, run1: AnalysisRun,
+    company2: str, ticker2: str, run2: AnalysisRun,
+) -> str:
+    """One additional grounded LLM call that actually weighs two completed
+    AnalysisRuns against each other. run_analysis produces two fully
+    independent stances with no comparative judgment between them, which
+    defeats the point of running it in compare mode -- this closes that
+    gap without re-deriving anything: grounded only in each run's own
+    quantitative snapshot (step 1) and final stance, so it can't introduce
+    a number neither run already surfaced."""
+    snap1 = next((s.output for s in run1.steps if s.title.startswith("1.")), "")
+    snap2 = next((s.output for s in run2.steps if s.title.startswith("1.")), "")
+    return generate(
+        system=_FMT_SYSTEM,
+        user=(
+            "Two completed equity research analyses, each grounded in that company's real, latest 10-Q:\n\n"
+            f"=== {company1} ({ticker1}) ===\n"
+            f"Quantitative snapshot: {snap1}\n\n"
+            f"Final stance: {run1.recommendation}\n\n"
+            f"=== {company2} ({ticker2}) ===\n"
+            f"Quantitative snapshot: {snap2}\n\n"
+            f"Final stance: {run2.recommendation}\n\n"
+            "Compare these two directly, head-to-head, across growth, profitability, and risk. Then give one "
+            "explicit verdict: if you could only hold one of these two names, which one, and why, in one "
+            "paragraph. Ground every claim in the material above -- do not introduce new figures."
+        ),
+        max_output_tokens=600,
+    )

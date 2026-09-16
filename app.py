@@ -14,13 +14,15 @@ Deploy free:   https://share.streamlit.io, pointed at this repo, app.py as
 """
 
 import hashlib
+from dataclasses import dataclass
 
+import pandas as pd
 import requests
 import streamlit as st
 from google.genai.errors import ClientError, ServerError
 
 from core import edgar_client, ratios as ratios_mod
-from services.pipeline import run_analysis
+from services.pipeline import AnalysisRun, compare_stances, run_analysis
 
 st.set_page_config(page_title="10-Q Equity Research Agent", page_icon="\U0001F4C8", layout="wide")
 
@@ -69,6 +71,16 @@ st.markdown(
     padding: 0.4rem 0 0.4rem 0.9rem;
     margin: 0.5rem 0 1rem 0;
 }
+.kpi-win { color: var(--bull); font-weight: 700; }
+.verdict-card {
+    background: rgba(37,99,235,0.05);
+    border: 1px solid rgba(37,99,235,0.2);
+    border-left: 4px solid var(--accent);
+    border-radius: 0.5rem;
+    padding: 1rem 1.25rem;
+    margin: 0.5rem 0 1.5rem;
+}
+h1, h2, h3 { letter-spacing: -0.01em; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -287,146 +299,294 @@ def fmt_ratio(key: str, value) -> str:
     return str(value)
 
 
-def run_and_render(ticker: str, container) -> None:
-    """Everything for one ticker: fetch, compute, run the pipeline, render.
-    Called once for a single lookup, or twice (once per column) when
-    comparing two tickers, so the two modes share one code path.
+@dataclass
+class Bundle:
+    ticker: str
+    filing: object
+    facts_json: dict
+    computed: dict
+    run: AnalysisRun
 
-    Found live: st.spinner()/st.status() aren't available as methods on a
-    column's DeltaGenerator in this Streamlit version (only a subset of
-    element functions are, like .markdown/.error/.columns/.tabs) --
-    StreamlitAPIException at the first container.spinner() call. Wrapping
-    the whole function body in `with container:` and using plain,
-    unqualified st.X() calls throughout sidesteps that distinction
-    entirely: Streamlit routes every element -- spinner and status
-    included -- into whichever container is the active context."""
-    with container:
-        try:
-            with st.spinner(f"Looking up {ticker} on SEC EDGAR..."):
-                filing = edgar_client.latest_10q(ticker)
-        except requests.exceptions.RequestException as exc:
-            st.error(f"Couldn't reach SEC EDGAR: {exc}. It may be rate-limiting or temporarily down — try again shortly.")
-            return
 
-        if filing is None:
-            st.error(
-                f"No 10-Q found for '{ticker}' on SEC EDGAR. Check it's a US-listed filer that reports on Form 10-Q "
-                "(foreign private issuers file 6-K/20-F instead, and won't resolve here)."
-            )
-            return
+def fetch_and_analyze(ticker: str) -> "Bundle | None":
+    """Fetch, compute, and run the pipeline for one ticker -- everything up
+    to but NOT including rendering. Kept separate from rendering (below) so
+    compare mode can bring both tickers to full completion first, then draw
+    every section as one aligned row shared by both sides, instead of the
+    old approach of running each ticker's entire fetch-render flow straight
+    through in its own column. That's what caused the misalignment: two
+    independently-flowing columns drift apart the moment one side's content
+    (a longer company name, a longer stance paragraph) is taller than the
+    other's, and every section below the drift inherits the offset. A
+    shared row for each section can't drift, because both sides are built
+    from the same Streamlit columns() call for that row alone."""
+    try:
+        with st.spinner(f"Looking up {ticker} on SEC EDGAR..."):
+            filing = edgar_client.latest_10q(ticker)
+    except requests.exceptions.RequestException as exc:
+        st.error(f"Couldn't reach SEC EDGAR for {ticker}: {exc}. It may be rate-limiting or temporarily down — try again shortly.")
+        return None
 
-        st.markdown(
-            f'<div class="company-card">{company_avatar_html(ticker)}'
-            f'<div class="company-card-text"><b>{filing.company_name}</b> ({ticker})<br/>'
-            f"10-Q for period ending {filing.report_date}, filed {filing.filing_date}. "
-            f'<a href="{filing.document_url}" target="_blank">View the real filing on SEC.gov →</a></div></div>',
-            unsafe_allow_html=True,
+    if filing is None:
+        st.error(
+            f"No 10-Q found for '{ticker}' on SEC EDGAR. Check it's a US-listed filer that reports on Form 10-Q "
+            "(foreign private issuers file 6-K/20-F instead, and won't resolve here)."
         )
+        return None
 
-        try:
-            with st.spinner("Fetching structured XBRL financials..."):
-                facts_json = edgar_client.company_facts(filing.cik)
-                facts = ratios_mod.extract_facts(facts_json)
-                computed = ratios_mod.compute_ratios(facts)
-        except requests.exceptions.RequestException as exc:
-            st.error(f"Couldn't fetch financial data from SEC EDGAR: {exc}. Try again shortly.")
-            return
+    try:
+        with st.spinner(f"Fetching {ticker}'s structured XBRL financials..."):
+            facts_json = edgar_client.company_facts(filing.cik)
+            facts = ratios_mod.extract_facts(facts_json)
+            computed = ratios_mod.compute_ratios(facts)
+    except requests.exceptions.RequestException as exc:
+        st.error(f"Couldn't fetch financial data for {ticker} from SEC EDGAR: {exc}. Try again shortly.")
+        return None
 
-        # ── KPI row ──────────────────────────────────────────────────────
-        prof, cf, growth = computed["profitability"], computed["cash_flow"], computed["yoy_growth"]
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Revenue YoY", fmt_ratio("yoy", growth.get("revenue_yoy")) if growth.get("revenue_yoy") is not None else "n/a")
-        k2.metric("Gross Margin", fmt_ratio("margin", prof.get("gross_margin")))
-        k3.metric("Operating Margin", fmt_ratio("margin", prof.get("operating_margin")))
-        k4.metric("Free Cash Flow", fmt_ratio("fcf", cf.get("free_cash_flow")))
+    try:
+        with st.spinner(f"Fetching {ticker}'s filing text for MD&A / risk factors..."):
+            filing_text = edgar_client.fetch_filing_text(filing)
+    except requests.exceptions.RequestException as exc:
+        st.error(f"Couldn't fetch {ticker}'s filing text: {exc}. Try again shortly.")
+        return None
 
-        # ── Trend charts (real multi-quarter history, not just 2 points) ──
-        hist_col1, hist_col2 = st.columns(2)
-        try:
-            rev_hist = ratios_mod.extract_history(facts_json, "revenue", n_quarters=8)
-            ni_hist = ratios_mod.extract_history(facts_json, "net_income", n_quarters=8)
-            if rev_hist:
-                with hist_col1:
-                    st.caption("Revenue, last 8 quarters ($)")
-                    st.line_chart({e: v for e, v in rev_hist})
-            if ni_hist:
-                with hist_col2:
-                    st.caption("Net income, last 8 quarters ($)")
-                    st.line_chart({e: v for e, v in ni_hist})
-        except Exception:
-            pass  # trend charts are a bonus visualization; never block the core analysis on them
+    # ── 5-step pipeline with live progress AND a live recap per step ──
+    run = None
+    try:
+        with st.status(f"Running 5-step research pipeline for {ticker}...", expanded=True) as status:
+            def _on_step(i, title):
+                status.update(label=f"{ticker} — Step {i}/5: {title}")
 
-        with st.expander("Full computed ratio breakdown", expanded=False):
-            for section, values in computed.items():
-                if section == "data_gaps":
-                    continue
-                st.markdown(f"**{section.replace('_', ' ').title()}**")
-                st.table({k.replace("_", " "): fmt_ratio(k, v) for k, v in values.items()})
-            if computed.get("data_gaps"):
-                st.markdown(
-                    f'<div class="gap-note">Not tagged in this filing\'s XBRL data (reported as unavailable, '
-                    f'never estimated): {", ".join(computed["data_gaps"])}</div>',
-                    unsafe_allow_html=True,
-                )
+            def _on_step_done(i, title, output):
+                preview = output if len(output) <= 500 else output[:500].rsplit(" ", 1)[0] + "…"
+                preview = escape_markdown_math(preview)
+                st.markdown(f"**✓ Step {i}/5 — {title}**")
+                st.markdown(f'<div class="step-recap">{preview}</div>', unsafe_allow_html=True)
 
-        try:
-            with st.spinner("Fetching filing text for MD&A / risk factors..."):
-                filing_text = edgar_client.fetch_filing_text(filing)
-        except requests.exceptions.RequestException as exc:
-            st.error(f"Couldn't fetch the filing text: {exc}. Try again shortly.")
-            return
-
-        # ── 5-step pipeline with live progress AND a live recap per step ──
-        run = None
-        try:
-            with st.status("Running 5-step research pipeline...", expanded=True) as status:
-                def _on_step(i, title):
-                    status.update(label=f"Step {i}/5: {title}")
-
-                def _on_step_done(i, title, output):
-                    preview = output if len(output) <= 500 else output[:500].rsplit(" ", 1)[0] + "…"
-                    preview = escape_markdown_math(preview)
-                    st.markdown(f"**✓ Step {i}/5 — {title}**")
-                    st.markdown(f'<div class="step-recap">{preview}</div>', unsafe_allow_html=True)
-
-                run = run_analysis(
-                    filing.company_name, ticker, filing.report_date, computed, filing_text,
-                    on_step=_on_step, on_step_done=_on_step_done,
-                )
-                status.update(label="Analysis complete", state="complete")
-        except RuntimeError as exc:
-            st.error(str(exc))
-            return
-        except (ClientError, ServerError) as exc:
-            # Every model in the fallback chain rejected the same request --
-            # gemini_client already retries individual models through quota
-            # exhaustion, overload, and transient bad-request errors, so
-            # getting here means it's not one flaky model, it's every one.
-            st.error(
-                f"The free-tier LLM pipeline failed on every fallback model: {exc}. "
-                "Free-tier quota resets daily -- try again later, or try a different ticker "
-                "(a very long or unusual filing can occasionally trip a request-size limit)."
+            run = run_analysis(
+                filing.company_name, ticker, filing.report_date, computed, filing_text,
+                on_step=_on_step, on_step_done=_on_step_done,
             )
-            return
+            status.update(label=f"{ticker} analysis complete", state="complete")
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return None
+    except (ClientError, ServerError) as exc:
+        # Every model in the fallback chain rejected the same request --
+        # gemini_client already retries individual models through quota
+        # exhaustion, overload, and transient bad-request errors, so
+        # getting here means it's not one flaky model, it's every one.
+        st.error(
+            f"The free-tier LLM pipeline failed on every fallback model for {ticker}: {exc}. "
+            "Free-tier quota resets daily -- try again later, or try a different ticker "
+            "(a very long or unusual filing can occasionally trip a request-size limit)."
+        )
+        return None
 
-        if run is None:
-            return
+    if run is None:
+        return None
+    return Bundle(ticker=ticker, filing=filing, facts_json=facts_json, computed=computed, run=run)
 
-        st.header("Equity Research Stance")
-        st.markdown(stance_badge(run.recommendation), unsafe_allow_html=True)
-        st.markdown(escape_markdown_math(run.recommendation))
 
-        st.header("Step-by-Step Analysis")
-        tabs = st.tabs([s.title for s in run.steps])
-        for tab, step in zip(tabs, run.steps):
-            with tab:
-                st.markdown(escape_markdown_math(step.output))
+# ── Render building blocks -- each renders into whatever container is
+#    currently active (the caller opens `with column:` where it matters),
+#    shared verbatim by single-ticker mode and compare mode. ────────────────
+def render_company_card(bundle: Bundle) -> None:
+    filing = bundle.filing
+    st.markdown(
+        f'<div class="company-card">{company_avatar_html(bundle.ticker)}'
+        f'<div class="company-card-text"><b>{filing.company_name}</b> ({bundle.ticker})<br/>'
+        f"10-Q for period ending {filing.report_date}, filed {filing.filing_date}. "
+        f'<a href="{filing.document_url}" target="_blank">View the real filing on SEC.gov →</a></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpis(bundle: Bundle) -> None:
+    prof, cf, growth = bundle.computed["profitability"], bundle.computed["cash_flow"], bundle.computed["yoy_growth"]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Revenue YoY", fmt_ratio("yoy", growth.get("revenue_yoy")) if growth.get("revenue_yoy") is not None else "n/a")
+    k2.metric("Gross Margin", fmt_ratio("margin", prof.get("gross_margin")))
+    k3.metric("Operating Margin", fmt_ratio("margin", prof.get("operating_margin")))
+    k4.metric("Free Cash Flow", fmt_ratio("fcf", cf.get("free_cash_flow")))
+
+
+def render_charts(bundle: Bundle) -> None:
+    hist_col1, hist_col2 = st.columns(2)
+    try:
+        rev_hist = ratios_mod.extract_history(bundle.facts_json, "revenue", n_quarters=8)
+        ni_hist = ratios_mod.extract_history(bundle.facts_json, "net_income", n_quarters=8)
+        if rev_hist:
+            with hist_col1:
+                st.caption("Revenue, last 8 quarters ($)")
+                st.line_chart({e: v for e, v in rev_hist})
+        if ni_hist:
+            with hist_col2:
+                st.caption("Net income, last 8 quarters ($)")
+                st.line_chart({e: v for e, v in ni_hist})
+    except Exception:
+        pass  # trend charts are a bonus visualization; never block the core analysis on them
+
+
+def render_ratio_breakdown(bundle: Bundle) -> None:
+    with st.expander(f"{bundle.ticker} — full computed ratio breakdown", expanded=False):
+        for section, values in bundle.computed.items():
+            if section == "data_gaps":
+                continue
+            st.markdown(f"**{section.replace('_', ' ').title()}**")
+            st.table({k.replace("_", " "): fmt_ratio(k, v) for k, v in values.items()})
+        if bundle.computed.get("data_gaps"):
+            st.markdown(
+                f'<div class="gap-note">Not tagged in this filing\'s XBRL data (reported as unavailable, '
+                f'never estimated): {", ".join(bundle.computed["data_gaps"])}</div>',
+                unsafe_allow_html=True,
+            )
+
+
+def render_stance(bundle: Bundle) -> None:
+    st.subheader("Equity Research Stance")
+    st.markdown(stance_badge(bundle.run.recommendation), unsafe_allow_html=True)
+    st.markdown(escape_markdown_math(bundle.run.recommendation))
+
+
+def render_steps(bundle: Bundle) -> None:
+    st.subheader("Step-by-Step Analysis")
+    tabs = st.tabs([s.title for s in bundle.run.steps])
+    for tab, step in zip(tabs, bundle.run.steps):
+        with tab:
+            st.markdown(escape_markdown_math(step.output))
+
+
+def render_single(bundle: Bundle) -> None:
+    render_company_card(bundle)
+    render_kpis(bundle)
+    render_charts(bundle)
+    render_ratio_breakdown(bundle)
+    st.divider()
+    render_stance(bundle)
+    render_steps(bundle)
+
+
+# ── Compare-mode-only render blocks: these actually compare, not just
+#    lay two independent analyses side by side. ─────────────────────────────
+_KPI_COMPARE_DEFS = [
+    ("Revenue YoY", "yoy", lambda c: c["yoy_growth"].get("revenue_yoy")),
+    ("Gross Margin", "margin", lambda c: c["profitability"].get("gross_margin")),
+    ("Operating Margin", "margin", lambda c: c["profitability"].get("operating_margin")),
+    ("Free Cash Flow", "fcf", lambda c: c["cash_flow"].get("free_cash_flow")),
+]
+
+
+def render_kpi_comparison(b1: Bundle, b2: Bundle) -> None:
+    # st.container(border=True), not a hand-rolled <div>, because a raw
+    # unsafe_allow_html div opened in one st.markdown call and closed in a
+    # later one does NOT wrap the native st.columns rows in between --
+    # Streamlit mounts each st.markdown call as its own sibling DOM node,
+    # so the browser just auto-closes the dangling tag. Found live.
+    with st.container(border=True):
+        header = st.columns([2, 1, 1])
+        header[1].markdown(f"**{b1.ticker}**")
+        header[2].markdown(f"**{b2.ticker}**")
+        for label, fmt_key, getter in _KPI_COMPARE_DEFS:
+            v1, v2 = getter(b1.computed), getter(b2.computed)
+            # Only highlight a winner when BOTH sides have a real value to
+            # compare -- found live: with the old (v2 is None or v1 > v2)
+            # form, a lone value on one side (the other reported "n/a")
+            # always highlighted green, even a negative YoY figure, which
+            # reads as "this side won" when really there was nothing to
+            # compare it against.
+            both_present = v1 is not None and v2 is not None
+            better1 = both_present and v1 > v2
+            better2 = both_present and v2 > v1
+            s1 = fmt_ratio(fmt_key, v1) if v1 is not None else "n/a"
+            s2 = fmt_ratio(fmt_key, v2) if v2 is not None else "n/a"
+            row = st.columns([2, 1, 1])
+            row[0].markdown(label)
+            row[1].markdown(f'<span class="{"kpi-win" if better1 else ""}">{s1}</span>', unsafe_allow_html=True)
+            row[2].markdown(f'<span class="{"kpi-win" if better2 else ""}">{s2}</span>', unsafe_allow_html=True)
+
+
+def render_chart_comparison(b1: Bundle, b2: Bundle) -> None:
+    try:
+        rev1 = dict(ratios_mod.extract_history(b1.facts_json, "revenue", n_quarters=8))
+        rev2 = dict(ratios_mod.extract_history(b2.facts_json, "revenue", n_quarters=8))
+        ni1 = dict(ratios_mod.extract_history(b1.facts_json, "net_income", n_quarters=8))
+        ni2 = dict(ratios_mod.extract_history(b2.facts_json, "net_income", n_quarters=8))
+    except Exception:
+        return  # trend charts are a bonus visualization; never block the core comparison on them
+
+    c1, c2 = st.columns(2)
+    if rev1 or rev2:
+        with c1:
+            st.caption("Revenue, last 8 quarters ($) — overlaid")
+            st.line_chart(pd.DataFrame({b1.ticker: rev1, b2.ticker: rev2}))
+    if ni1 or ni2:
+        with c2:
+            st.caption("Net income, last 8 quarters ($) — overlaid")
+            st.line_chart(pd.DataFrame({b1.ticker: ni1, b2.ticker: ni2}))
+
+
+def render_verdict(b1: Bundle, b2: Bundle) -> None:
+    st.subheader("Head-to-Head: Which Would You Rather Own?")
+    try:
+        with st.spinner("Weighing both theses against each other..."):
+            verdict = compare_stances(
+                b1.filing.company_name, b1.ticker, b1.run,
+                b2.filing.company_name, b2.ticker, b2.run,
+            )
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return
+    except (ClientError, ServerError) as exc:
+        st.error(f"Couldn't generate a head-to-head verdict: {exc}")
+        return
+    # Blank lines right after the opening tag matter: found live, a
+    # markdown heading (###) glued directly to <div> with no blank line
+    # doesn't get parsed as a block-level heading and renders as literal
+    # text, even though a table a few lines later parses fine.
+    st.markdown(f'<div class="verdict-card">\n\n{escape_markdown_math(verdict)}\n\n</div>', unsafe_allow_html=True)
+
+
+def render_compare(b1: "Bundle | None", b2: "Bundle | None") -> None:
+    if b1 is None or b2 is None:
+        return  # a fetch/pipeline error for one side was already shown by fetch_and_analyze
+    left, right = st.columns(2, gap="large")
+    with left:
+        render_company_card(b1)
+    with right:
+        render_company_card(b2)
+
+    st.subheader("Key Metrics — Head to Head")
+    render_kpi_comparison(b1, b2)
+    render_chart_comparison(b1, b2)
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        render_ratio_breakdown(b1)
+    with right:
+        render_ratio_breakdown(b2)
+
+    st.divider()
+    render_verdict(b1, b2)
+
+    st.divider()
+    left, right = st.columns(2, gap="large")
+    with left, st.container(border=True):
+        render_stance(b1)
+        st.divider()
+        render_steps(b1)
+    with right, st.container(border=True):
+        render_stance(b2)
+        st.divider()
+        render_steps(b2)
 
 
 if run_clicked:
     if compare_mode:
-        left, right = st.columns(2)
-        run_and_render(ticker1, left)
-        run_and_render(ticker2, right)
+        b1 = fetch_and_analyze(ticker1)
+        b2 = fetch_and_analyze(ticker2)
+        render_compare(b1, b2)
     else:
-        run_and_render(ticker1, st.container())
+        bundle = fetch_and_analyze(ticker1)
+        if bundle is not None:
+            render_single(bundle)
