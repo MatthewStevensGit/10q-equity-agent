@@ -20,7 +20,30 @@ from google.genai.errors import ClientError, ServerError
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+def _load_gemini_api_key() -> str | None:
+    """os.getenv() covers local dev (.env via load_dotenv above). On
+    Streamlit Community Cloud, secrets set in the dashboard are documented
+    to mirror into os.environ automatically -- but only lazily, the first
+    time anything actually touches st.secrets. This module never did, so
+    that mirroring never fired and os.getenv came back empty even with a
+    correctly-configured secret (confirmed live: the secret was
+    byte-exact correct and the key itself verified valid against Google's
+    API directly, yet the app still reported "not set"). Reading
+    st.secrets directly, guarded for the plain-Python/no-secrets-file
+    case (local dev without .streamlit/secrets.toml raises here), fixes
+    it regardless of whether anything else already triggered the mirror."""
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        return key
+    try:
+        import streamlit as st
+        return st.secrets.get("GEMINI_API_KEY")
+    except Exception:  # noqa: BLE001 -- no secrets.toml locally, or not running under streamlit
+        return None
+
+
+GEMINI_API_KEY = _load_gemini_api_key()
 
 DEFAULT_MODEL = "gemini-3.5-flash"
 MODEL_CHAIN = [
