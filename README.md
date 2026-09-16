@@ -7,7 +7,7 @@ pipeline against the real filing text to produce a quantitative snapshot,
 a risk synthesis, a narrative-vs-numbers consistency check, a capital
 allocation read, and a final equity research stance.
 
-**Live app:** _(deployed link goes here)_
+**Live app:** https://10q-equity-agent-esldzub5xgfc3j8mcc8u42.streamlit.app/
 **Résumé:** [Matthew Ginzburg — Résumé](docs/Matthew_Ginzburg_Resume.docx)
 
 ## Why this exists
