@@ -1,13 +1,13 @@
 # 10-Q Equity Research Agent
 
+**Live app:** https://10q-equity-agent-esldzub5xgfc3j8mcc8u42.streamlit.app/
+
 Enter any US-listed ticker. Pulls its real, latest 10-Q from SEC EDGAR
 (free, public, no key), computes standard financial ratios from the
 filing's actual structured (XBRL) data, then runs a 5-step LLM research
 pipeline against the real filing text to produce a quantitative snapshot,
 a risk synthesis, a narrative-vs-numbers consistency check, a capital
 allocation read, and a final equity research stance.
-
-**Live app:** https://10q-equity-agent-esldzub5xgfc3j8mcc8u42.streamlit.app/
 
 ## Why this exists
 
