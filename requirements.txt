@@ -1,4 +1,5 @@
 streamlit>=1.64.0
+streamlit-searchbox==0.1.24
 pillow>=12.0
 pandas>=2.0
 requests==2.32.3

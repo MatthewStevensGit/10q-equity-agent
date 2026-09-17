@@ -20,6 +20,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from google.genai.errors import ClientError, ServerError
+from streamlit_searchbox import st_searchbox
 
 from core import edgar_client, ratios as ratios_mod
 from services.pipeline import AnalysisRun, compare_stances, run_analysis
@@ -188,51 +189,79 @@ def company_avatar_html(ticker: str, size: int = 56) -> str:
     return _avatar_badge(ticker, size)
 
 
-# ── Ticker / company-name search (real autocomplete over SEC's own ~10k-
-#    company directory, not a small hardcoded list) ─────────────────────────
+# ── Ticker search (one real combobox, ranked on the ticker itself) ────────
+#
+# Streamlit's own selectbox filters its options client-side by unranked
+# substring match against whatever text is displayed, so typing "BE" could
+# surface "ABEO" (contains "be") ahead of the actual exact ticker "BE" --
+# and there's no way to fix that from inside a plain selectbox, since its
+# filtering runs in the browser, not in this script. A separate text_input
+# next to it fixed the ranking but made it two boxes instead of one search
+# experience. streamlit_searchbox is a single widget that calls a real
+# Python function on every keystroke and renders ITS return value as the
+# dropdown, so the same box both takes the input and shows the live-ranked
+# results -- and the ranking below only ever looks at the ticker itself:
+# exact ticker > ticker starts with the query > ticker contains the query.
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def _load_ticker_options() -> list[str]:
+def _load_ticker_directory() -> list[tuple[str, str]]:
     directory = edgar_client.company_directory()
     seen: dict[str, str] = {}
     for t, name, _cik in directory:
         if t not in seen:
             seen[t] = name
-    return [f"{t} — {name}" for t, name in sorted(seen.items())]
+    return sorted(seen.items())
 
 
-def _ticker_from_label(label: str | None) -> str:
-    if not label:
-        return ""
-    return label.split(" — ", 1)[0].strip().upper()
+def _ticker_rank(query: str, ticker: str) -> int:
+    """Lower is a better match; 3 means "no match" and gets dropped."""
+    if ticker == query:
+        return 0
+    if ticker.startswith(query):
+        return 1
+    if query in ticker:
+        return 2
+    return 3
 
 
-TICKER_OPTIONS = _load_ticker_options()
+def _search_tickers(query: str, directory: list[tuple[str, str]], limit: int = 20) -> list[tuple[str, str]]:
+    """Returns (display_label, ticker) pairs -- st_searchbox shows the label
+    in the dropdown and returns the matching ticker once one is picked."""
+    q = query.strip().upper()
+    if not q:
+        return [(f"{t} — {name}", t) for t, name in directory[:limit]]
+    ranked = sorted(
+        ((_ticker_rank(q, t), t, name) for t, name in directory if _ticker_rank(q, t) < 3),
+        key=lambda r: (r[0], r[1]),
+    )
+    return [(f"{t} — {name}", t) for _, t, name in ranked[:limit]]
+
+
+TICKER_DIRECTORY = _load_ticker_directory()
 
 compare_mode = st.checkbox("Compare with a second ticker")
 
 col1, col2 = st.columns(2) if compare_mode else (st.container(), None)
 with col1:
-    label1 = st.selectbox(
-        "Ticker or company name" if not compare_mode else "First ticker",
-        options=TICKER_OPTIONS,
-        index=None,
-        placeholder="Type a ticker or company name (e.g. Apple, AAPL, Microsoft)...",
-        key="ticker_select",
-        label_visibility="collapsed" if not compare_mode else "visible",
-    )
-ticker1 = _ticker_from_label(label1)
+    ticker1 = st_searchbox(
+        lambda q: _search_tickers(q, TICKER_DIRECTORY),
+        placeholder="Type a ticker (e.g. AAPL, BE, MSFT)...",
+        label="Ticker" if not compare_mode else "First ticker",
+        key="ticker_searchbox_1",
+        clear_on_submit=False,
+    ) or ""
+ticker1 = ticker1.strip().upper()
 
 ticker2 = ""
 if compare_mode:
     with col2:
-        label2 = st.selectbox(
-            "Second ticker",
-            options=TICKER_OPTIONS,
-            index=None,
-            placeholder="Type a second ticker or company name...",
-            key="ticker_select_2",
-        )
-    ticker2 = _ticker_from_label(label2)
+        ticker2 = st_searchbox(
+            lambda q: _search_tickers(q, TICKER_DIRECTORY),
+            placeholder="Type a second ticker...",
+            label="Second ticker",
+            key="ticker_searchbox_2",
+            clear_on_submit=False,
+        ) or ""
+    ticker2 = ticker2.strip().upper()
 
 run_clicked = st.button(
     "Run analysis" if not compare_mode else "Compare",
@@ -341,19 +370,28 @@ def fetch_and_analyze(ticker: str) -> "Bundle | None":
     try:
         with st.status(f"Running 5-step research pipeline for {ticker}...", expanded=True) as status:
             def _on_step(i, title):
-                status.update(label=f"{ticker} — Step {i}/5: {title}")
+                # expanded=True must be re-asserted on every update() call --
+                # st.status can silently fall back to collapsed otherwise,
+                # which is what was closing the recap after each step.
+                status.update(label=f"{ticker} — Step {i}/5: {title}", expanded=True)
 
             def _on_step_done(i, title, output):
-                preview = output if len(output) <= 500 else output[:500].rsplit(" ", 1)[0] + "…"
-                preview = escape_markdown_math(preview)
+                # Used to hard-truncate this to 500 chars -- verified live
+                # against real runs that this silently cut off every step
+                # mid-sentence (confirmed: the "…" landed at ~500 chars into
+                # EVERY step, every run), which is exactly why a risk table
+                # with 3 rows (Risk 2 or 3, e.g. "Management") could render
+                # as if there were nothing there -- the real content existed,
+                # it just never reached the page. Show the full real output.
+                rendered = escape_markdown_math(output)
                 st.markdown(f"**✓ Step {i}/5 — {title}**")
-                st.markdown(f'<div class="step-recap">{preview}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="step-recap">{rendered}</div>', unsafe_allow_html=True)
 
             run = run_analysis(
                 filing.company_name, ticker, filing.report_date, computed, filing_text,
                 on_step=_on_step, on_step_done=_on_step_done,
             )
-            status.update(label=f"{ticker} analysis complete", state="complete")
+            status.update(label=f"{ticker} analysis complete", state="complete", expanded=True)
     except RuntimeError as exc:
         st.error(str(exc))
         return None
